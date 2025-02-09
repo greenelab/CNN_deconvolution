@@ -1,25 +1,29 @@
 import os
 import json
-import ray
-from ray import tune
 import argparse
 import torch
 import sys
 from pathlib import Path
-from ray.tune.schedulers import ASHAScheduler
 from torch.utils.data import DataLoader, random_split, Dataset
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+import numpy as np
+import pandas as pd
+import shutil
 
 # Ensure PYTHONPATH includes the parent directory of 'src'
 sys.path.insert(1, '../../')
 sys.path.insert(1, '../')
 sys.path.insert(1, '../../../../../')
-print("Updated PYTHONPATH:", sys.path)  # Debugging line
+print("Updated PYTHONPATH:", sys.path)  
 
 from src.utils import SimpleMLP, SimpleCNN_3CH, SimpleCNN, PCamDataset, load_training_data, load_testing_data
 
 script_dir = Path(__file__).resolve().parent
 
 def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=None):
+
+    best_val_loss = float("inf")
+    patience = 5  # default value for early stopping
 
     train_loader, val_loader, shuffle_order_rows1, shuffle_order_columns1 = load_training_data(dataset = dataset,
                                                                                             batch_size=config["batch_size"],
@@ -31,7 +35,11 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
                                                                                             pcam_data_path=pcam_data_path,
                                                                                             shuffle_order_rows = shuffle_order_rows1,
                                                                                             shuffle_order_columns = shuffle_order_columns1)
-    assert(shuffle_order_columns1 == shuffle_order_columns)                                                                                        
+    # Compare shuffle orders for consistency
+    if shuffle_order_columns1 is not None and shuffle_order_columns is not None:
+        assert np.array_equal(shuffle_order_columns1, shuffle_order_columns), "Shuffle order columns do not match!"
+    if shuffle_order_rows1 is not None and shuffle_order_rows is not None:
+        assert np.array_equal(shuffle_order_rows1, shuffle_order_rows), "Shuffle order rows do not match!"
 
     if model_type == "MLP":
         model = SimpleMLP(
@@ -67,13 +75,15 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
 
     train_losses = []
     val_losses = []
+    epochs_without_improvement = 0
 
     for epoch in range(25):
         # Training phase
         model.train()
         epoch_train_loss = 0.0
         for inputs, labels in train_loader:
-            inputs = inputs.view(inputs.size(0), -1)  # Flatten MNIST images
+            if model_type in ["MLP", "MLP_3CH"]:
+                inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -87,11 +97,22 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
         epoch_val_loss = 0.0
         with torch.no_grad():
             for inputs, labels in val_loader:
-                inputs = inputs.view(inputs.size(0), -1)  # Flatten MNIST images
+                if model_type in ["MLP", "MLP_3CH"]:
+                    inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 epoch_val_loss += loss.item()
         val_losses.append(epoch_val_loss / len(val_loader))
+
+            # Check for early stopping
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
 
     # Test phase
     model.eval()
@@ -99,7 +120,8 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
     all_preds = []
     with torch.no_grad():
         for inputs, labels in test_loader:
-            inputs = inputs.view(inputs.size(0), -1)  # Flatten MNIST images
+            if model_type in ["MLP", "MLP_3CH"]:
+                inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
             outputs = model(inputs)
             _, preds = torch.max(outputs, 1)
             all_preds.extend(preds.cpu().numpy())
@@ -117,9 +139,9 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
 
 def main_train(model_type, dataset, config_path, output_path, pcam_data_path, image_dim):
     # Paths
-    config_path = script_dir.parent / f"{config_path}"  # This points to MNIST data directory
+    config_path = script_dir.parent / f"{config_path}"  # This points to data directory
 
-    out_path = script_dir.parent / f"{output_path}"  # This points to MNIST data directory
+    out_path = script_dir.parent / f"{output_path}"  # This points to data directory
     os.makedirs(out_path, exist_ok=True)
 
     config_file_path = os.path.join(config_path, f"best_configs_{model_type}_{dataset}.json")
@@ -134,6 +156,7 @@ def main_train(model_type, dataset, config_path, output_path, pcam_data_path, im
     all_losses = {}
 
     for idx, config in enumerate(configurations):
+        
         print(f"Training model {idx + 1}/{len(configurations)}")
 
         # Train and evaluate
@@ -160,6 +183,13 @@ def main_train(model_type, dataset, config_path, output_path, pcam_data_path, im
             "val_losses": val_losses,
         }
 
+        # Save intermediate results
+        with open(results_csv_path, "a") as f:
+            pd.DataFrame([results[-1]]).to_csv(f, header=f.tell() == 0, index=False)
+
+        with open(losses_json_path, "w") as f:
+            json.dump(all_losses, f, indent=4)
+
     # Save results to CSV
     results_df = pd.DataFrame(results)
     results_df.to_csv(results_csv_path, index=False)
@@ -173,44 +203,12 @@ def main_train(model_type, dataset, config_path, output_path, pcam_data_path, im
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Training for models according to configurations.")
     parser.add_argument("--model_type", type=str, choices=["MLP", "MLP_3CH", "CNN", "CNN_3CH"], required=True, help="Type of model (MLP, MLP_3CH, CNN).")
-    parser.add_argument("--dataset", type=str, choices=["MNIST", "MNISTshuffled", "CIFAR10shuffled", "CIFAR10", "PCam", "PCamshuffled"], required=True, help="Dataset to use = NAME + shuffled.")
+    parser.add_argument("--dataset", type=str, choices=["MNIST", "MNISTshuffled", "FashMNIST", "FashMNISTshuffled", "CIFAR10shuffled", "CIFAR10", "PCam", "PCamshuffled"], required=True, help="Dataset to use = NAME + shuffled.")
     parser.add_argument("--output_path", type=str, required=True, help="Path to save the best configurations.")
     parser.add_argument("--pcam_data_path", type=str, required=True, help="Path to the PCam data.")
     parser.add_argument("--config_path", type=str, required=True, help="Path to the tuned configurations.")
 
     args = parser.parse_args()
-
-    config = {
-        "MLP": {
-            "fc1_hidden": tune.randint(208, 686),  # Number of neurons in the first fully connected layer
-            "fc2_hidden": tune.randint(110, 588),  # Number of neurons in the second fully connected layer
-            "fc3_hidden": tune.randint(58, 438),  # Number of neurons in the third fully connected layer
-            "learning_rate": tune.loguniform(1e-4, 1e-2),  # Learning rate
-            "batch_size": tune.choice([32, 64, 120]),  # Batch size
-        },
-        "MLP_3CH": {
-            "fc1_hidden": tune.randint(62, 358),
-            "fc2_hidden": tune.randint(40, 218),
-            "fc3_hidden": tune.randint(26, 90),
-            "learning_rate": tune.loguniform(1e-4, 1e-2),
-            "batch_size": tune.choice([32, 64, 120])
-        },
-        "CNN": {
-            "cha_input": tune.randint(56, 86),  # Number of input channels for conv1
-            "cha_hidden": tune.randint(88, 146),  # Number of hidden channels for conv2 and conv3
-            "fc_hidden": tune.randint(98, 270),  # Number of hidden units in fully connected layer
-            "learning_rate": tune.loguniform(1e-4, 1e-2),
-            "batch_size": tune.choice([32, 64, 120]),
-        },
-        "CNN_3CH": {
-            "cha_input": tune.randint(40, 80),
-            "cha_hidden": tune.randint(64, 128),
-            "fc_hidden": tune.randint(128, 256),
-            "learning_rate": tune.loguniform(1e-4, 1e-2),
-            "batch_size": tune.choice([32, 64, 120])
-        },
-        
-    }[args.model_type]
 
     if "MNIST" in args.dataset:
         image_dim = 28

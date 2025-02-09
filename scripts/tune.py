@@ -7,7 +7,11 @@ from ray import tune
 from pathlib import Path
 from torch.utils.data import DataLoader, random_split, Dataset
 from ray.tune.schedulers import ASHAScheduler
+from ray.air.config import RunConfig
 import argparse
+import shutil
+import uuid
+
 # Ensure PYTHONPATH includes the parent directory of 'src'
 sys.path.insert(1, '../../')
 sys.path.insert(1, '../')
@@ -63,6 +67,8 @@ def train_model(config,
     for epoch in range(25):
         model.train()
         for inputs, labels in train_loader:
+            if model_type in ["MLP", "MLP_3CH"]:
+                inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -73,8 +79,11 @@ def train_model(config,
         val_loss = 0.0
         correct = 0
         total = 0
+
         with torch.no_grad():
             for inputs, labels in val_loader:
+                if model_type in ["MLP", "MLP_3CH"]:
+                    inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 val_loss += loss.item() * inputs.size(0)
@@ -86,38 +95,44 @@ def train_model(config,
         accuracy = correct / total
         ray.train.report({"val_loss": val_loss, "accuracy": accuracy})
 
-def run_tuning(model_type, dataset, config, output_path, tmp_dir, num_iterations, pcam_data_path=None, image_dim=28):
-    scheduler = ASHAScheduler(max_t=25, grace_period=5, metric="val_loss", mode="min")
-
+def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, num_iterations, pcam_data_path=None, image_dim=28):
+    
     ray.shutdown()
-    ray.init(
+    os.makedirs(working_dir, exist_ok=True)  # Create the directory if it doesn't exist
+    os.makedirs(tmp_dir, exist_ok=True)  # Create the directory if it doesn't exist
+
+    ray.init(address="auto",  
         runtime_env={
-            "working_dir": tmp_dir,
-            "py_modules": ["/projects/aivich@xsede.org/CNN_deconvolution/src"],  # Explicitly add the `src` module
-            "excludes": [
-                "*.zip",  # Exclude all zip files
-                "session_latest/runtime_resources/*",  # Exclude specific runtime directories
-                "artifacts/*",  # Exclude artifact directories
-            ],
+            "working_dir": working_dir,
+            "py_modules": [str(script_dir.parent / "src")],
         },
         _temp_dir=tmp_dir,
-    )
+        log_to_driver=False, include_dashboard=False 
+        )
 
-    # Ensure the output directory exists
+    scheduler = ASHAScheduler(max_t=25, grace_period=5, metric="val_loss", mode="min")
+
+    # Ensure the output dir exists
     output_dir = os.path.dirname(output_path)  # Extract directory from output path
     os.makedirs(output_dir, exist_ok=True)  # Create the directory if it doesn't exist
 
     for i in range(num_iterations):
+
+        # Use a unique experiment name for each iteration
+        experiment_name = f"tuning_iteration_{i+1}"
+        
         # Run tuning
+        print(f"Running iteration number {i}...")
+
         analysis = tune.run(
             tune.with_parameters(train_model, model_type=model_type, dataset=dataset, image_dim=image_dim, pcam_data_path=pcam_data_path),
             config=config,
             num_samples=100,
             scheduler=scheduler,
-            resources_per_trial={"cpu": 20},
+            resources_per_trial={"cpu": 8},
             fail_fast=False,
             storage_path=tmp_dir,
-            name=f"tuning_iteration_{i+1}"  # Unique experiment name
+            name=experiment_name  # Unique experiment name
         )
 
         # Get the best configuration from the current iteration
@@ -148,27 +163,26 @@ def run_tuning(model_type, dataset, config, output_path, tmp_dir, num_iterations
 
         # Clean up the temporary directory for storage
         try:
-            for item in os.listdir(tmp_dir):
-                item_path = os.path.join(tmp_dir, item)
-                if os.path.isdir(item_path):
-                    shutil.rmtree(item_path)  # Remove directories
-                else:
-                    os.remove(item_path)  # Remove files
-            print(f"Temporary directory '{tmp_dir}' cleaned up after iteration {i+1}.")
+            shutil.rmtree(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
         except Exception as e:
-            print(f"Error cleaning up temporary directory '{tmp_dir}': {e}")
+            print(f"Failed to clean up tmp_dir: {e}")
 
     ray.shutdown()
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hyperparameter tuning for models.")
     parser.add_argument("--model_type", type=str, choices=["MLP", "MLP_3CH", "CNN", "CNN_3CH"], required=True, help="Type of model (MLP, MLP_3CH, CNN).")
-    parser.add_argument("--dataset", type=str, choices=["MNIST", "MNISTshuffled", "CIFAR10shuffled", "CIFAR10", "PCam", "PCamshuffled"], required=True, help="Dataset to use = NAME + shuffled.")
+    parser.add_argument("--dataset", type=str, choices=["MNIST", "MNISTshuffled", "FashMNIST", "FashMNISTshuffled", "CIFAR10shuffled", "CIFAR10", "PCam", "PCamshuffled"], required=True, help="Dataset to use = NAME + shuffled.")
     parser.add_argument("--tmp_dir", type=str, required=True, help="Temporary directory for Ray Tune.")
+    parser.add_argument("--working_dir", type=str, required=True, help="Working directory for Ray Tune. Must have lots of space.")
     parser.add_argument("--output_path", type=str, required=True, help="Path to save the best configurations.")
     parser.add_argument("--pcam_data_path", type=str, required=True, help="Path to the PCam data.")
+    parser.add_argument("--num_iterations", type=str, required=True, help="How many times to tune 100 samples.")
 
     args = parser.parse_args()
+
+    os.environ["RAY_TMPDIR"] = args.tmp_dir
 
     config = {
         "MLP": {
@@ -209,10 +223,13 @@ if __name__ == "__main__":
     elif "CIFAR10" in args.dataset:
         image_dim = 32
 
+    num_iterations = int(args.num_iterations)
+
     run_tuning(model_type=args.model_type, 
                             dataset=args.dataset, 
                             config=config, 
                             output_path= args.output_path, 
                             tmp_dir=args.tmp_dir, 
+                            working_dir=args.working_dir,
                             pcam_data_path = args.pcam_data_path, 
-                            image_dim=image_dim, num_iterations=40)
+                            image_dim=image_dim, num_iterations=num_iterations)

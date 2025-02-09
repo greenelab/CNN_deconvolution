@@ -49,7 +49,7 @@ class PCamDataset(Dataset):
         label_tensor = torch.tensor(label, dtype=torch.long)
         return img_tensor, label_tensor
 
-def load_training_data(dataset, batch_size, pcam_data_path=None, val_split=0.2):
+def load_training_data(dataset, batch_size, pcam_data_path=None, val_split=0.2, shuffle_order_rows=None):
 
     transform = transforms.Compose([
         transforms.ToTensor(),  # Converts to a tensor and scales to [0, 1]
