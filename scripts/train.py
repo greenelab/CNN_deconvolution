@@ -216,6 +216,8 @@ if __name__ == "__main__":
         image_dim = 96
     elif "CIFAR10" in args.dataset:
         image_dim = 32
+    else:
+        raise ValueError('Data must be MNIST, FashMNIST, PCam or CIFAR10')
 
     main_train(model_type=args.model_type, 
                 dataset=args.dataset,

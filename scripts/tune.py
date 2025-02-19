@@ -101,7 +101,7 @@ def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, n
     os.makedirs(working_dir, exist_ok=True)  # Create the directory if it doesn't exist
     os.makedirs(tmp_dir, exist_ok=True)  # Create the directory if it doesn't exist
 
-    ray.init(address="auto",  
+    ray.init( 
         runtime_env={
             "working_dir": working_dir,
             "py_modules": [str(script_dir.parent / "src")],
@@ -222,6 +222,8 @@ if __name__ == "__main__":
         image_dim = 96
     elif "CIFAR10" in args.dataset:
         image_dim = 32
+    else:
+        raise ValueError('Data must be MNIST, FashMNIST, PCam or CIFAR10')
 
     num_iterations = int(args.num_iterations)
 
