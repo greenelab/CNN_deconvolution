@@ -8,6 +8,19 @@ from torch.utils.data import DataLoader, random_split, Dataset
 import torchvision
 import torchvision.transforms as transforms
 
+def get_dimensions(dataset):
+    ''' Get image dimensions from dataset name'''
+    if "MNIST" in dataset:
+        image_dim = 28
+    elif "PCam" in dataset:
+        image_dim = 96
+    elif "CIFAR10" in dataset:
+        image_dim = 32
+    else:
+        raise ValueError('Data must be MNIST, FashMNIST, PCam or CIFAR10')
+    return image_dim
+
+
 # Shuffle the rows and columns of an image
 def shuffle_image_rows_columns(image, shuffle_order_rows, shuffle_order_columns):
     image = image[shuffle_order_rows, :]  # Shuffle rows
@@ -72,6 +85,8 @@ def load_training_data(dataset, batch_size, pcam_data_path=None, val_split=0.2, 
             targets_path=f"{data_path}camelyonpatch_level_2_split_train_y.h5"
         )
         image_dim = 96  # PCam images are 96x96x3
+    else:
+        raise ValueError('Data must be MNIST, FashMNIST, PCam or CIFAR10')
 
     shuffle = True if 'shuffle' in dataset else False
 
@@ -156,7 +171,7 @@ def load_testing_data(dataset, batch_size, pcam_data_path, shuffle_order_rows=No
 # Define the CNN model
 class SimpleCNN_3CH(nn.Module):
     def __init__(self, cha_input, cha_hidden, fc_hidden, kernel_size=3, stride=1, padding=1):
-        super(SimpleCNN_3CH, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(3, cha_input, kernel_size=kernel_size, stride=stride, padding=padding)
         self.bn1 = nn.BatchNorm2d(cha_input)
         self.pool = nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
@@ -180,7 +195,7 @@ class SimpleCNN_3CH(nn.Module):
 # Define the CNN model
 class SimpleCNN(nn.Module):
     def __init__(self, cha_input, cha_hidden, fc_hidden, kernel_size=3, stride=1, padding=1):
-        super(SimpleCNN, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(1, cha_input, kernel_size=kernel_size, stride=stride, padding=padding)
         self.bn1 = nn.BatchNorm2d(cha_input)
         self.pool = nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
@@ -204,7 +219,7 @@ class SimpleCNN(nn.Module):
 # Define the MLP model
 class SimpleMLP(nn.Module):
     def __init__(self, input_dim, fc1_hidden, fc2_hidden, fc3_hidden):
-        super(SimpleMLP, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(input_dim, fc1_hidden)
         self.bn1 = nn.BatchNorm1d(fc1_hidden)
         self.fc2 = nn.Linear(fc1_hidden, fc2_hidden)
