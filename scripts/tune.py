@@ -18,7 +18,7 @@ sys.path.insert(1, '../')
 sys.path.insert(1, '../../../../../')
 print("Updated PYTHONPATH:", sys.path)  # Debugging line
 
-from src.utils import SimpleMLP, SimpleCNN_3CH, SimpleCNN, PCamDataset, load_training_data
+from src.utils import SimpleMLP, SimpleCNN_3CH, SimpleCNN, PCamDataset, load_training_data, get_dimensions
 
 script_dir = Path(__file__).resolve().parent
 
@@ -216,15 +216,7 @@ if __name__ == "__main__":
         
     }[args.model_type]
 
-    if "MNIST" in args.dataset:
-        image_dim = 28
-    elif "PCam" in args.dataset:
-        image_dim = 96
-    elif "CIFAR10" in args.dataset:
-        image_dim = 32
-    else:
-        raise ValueError('Data must be MNIST, FashMNIST, PCam or CIFAR10')
-
+    image_dim = get_dimensions(args.dataset)
     num_iterations = int(args.num_iterations)
 
     run_tuning(model_type=args.model_type, 
